@@ -12,7 +12,7 @@ android {
     compileSdkVersion 28
     defaultConfig {
         applicationId "org.pytorch.demo"
-        minSdkVersion 21
+        minSdkVersion 28 //21
         targetSdkVersion 28
         versionCode 1
         versionName "1.0"
@@ -37,4 +37,6 @@ dependencies {
 
     implementation 'org.pytorch:pytorch_android:1.4.0'
     implementation 'org.pytorch:pytorch_android_torchvision:1.4.0'
+    //implementation 'com.google.guava:guava:28.2-jre'
+    //implementation 'com.google.guava:guava:28.2-android'
 }
