@@ -155,7 +155,7 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
     Log.d("INFO", moduleAssetNameFromIntent);
     mModuleAssetName = !TextUtils.isEmpty(moduleAssetNameFromIntent)
         ? moduleAssetNameFromIntent
-        : "plateai.pt";
+        : "plateai_mobile.pt";
 
     return mModuleAssetName;
   }
