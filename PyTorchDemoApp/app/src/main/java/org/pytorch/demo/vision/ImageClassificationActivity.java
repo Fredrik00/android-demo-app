@@ -22,12 +22,14 @@ import java.io.File;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.WorkerThread;
@@ -54,7 +56,7 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
   private static final String BLANK = " ";
   private static final String ALPHABET = BLANK + "0123456789abcdefghijklmnopqrstuvwxyzøæå";
   private static final int PRED_LENGTH = INPUT_TENSOR_WIDTH / 4;
-  private static final double MIN_CONF = 0.0;  // Needs special care with topK
+  private static final double MIN_CONF = 0.3;  // Needs special care with topK
 
   static class AnalysisResult {
 
@@ -252,13 +254,13 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
         }
       }
 
-      List<PredConf> topK = getTopK(charScores, 0.01f);
+      List<PredConf> topK = getTopK(charScores, 0.01f, 200);
 
       final String[] topKClassNames = new String[TOP_K];
       final float[] topKScores = new float[TOP_K];
-      for (int i = 0; i < TOP_K; i++) {
-        topKClassNames[i] = topK.get(i).pred; //decode(rawPred, rawConf);
-        topKScores[i] = topK.get(i).conf; //100;
+      for (int i = 0; i < Math.min(topK.size(), TOP_K); i++) {
+        topKClassNames[i] = topK.get(i).pred;
+        topKScores[i] = topK.get(i).conf;
       }
       final long analysisDuration = SystemClock.elapsedRealtime() - startTime;
       return new AnalysisResult(topKClassNames, topKScores, moduleForwardDuration, analysisDuration);
@@ -310,8 +312,9 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
   }
 
   //@RequiresApi(api = Build.VERSION_CODES.N)
-  private List<PredConf> getTopK(List<List<Float>> pred, Float minConf) {
+  private List<PredConf> getTopK(List<List<Float>> pred, Float minConf, int maxIter) {
     Map<String, Float> decPreds = new HashMap<>();
+    Set<List<String>> rawPreds = new HashSet<>();
     List<Stuff> predStack = new ArrayList<>();
 
     List<List<Integer>> sortedIndexes = pred.stream().map(charProbs -> {
@@ -324,18 +327,20 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
     }).collect(toList());
 
     List<Integer> rawPred = sortedIndexes.stream().map(indexes -> indexes.remove(indexes.size() -1)).collect(toList());
-    List<Float> rawConf = new ArrayList<>(); //zip(rawPred.stream(), IntStream.range(0, rawPred.size()).boxed(), (a,b) -> pred.get(b).get(a)).collect(toList());
+    List<Float> rawConf = new ArrayList<>();
     for (int i=0; i<rawPred.size(); i++){
       rawConf.add(pred.get(i).get(rawPred.get(i)));
     }
 
-    PredConf maxPred = decodeAndStore(rawPred, rawConf, decPreds);
+    PredConf maxPred = decodeAndStore(rawPred, rawConf, decPreds, rawPreds);
 
     float conf = maxPred.conf;
     predStack.add(new Stuff(rawPred, null, sortedIndexes, maxPred.conf, null, rawConf, null));
 
-    while (decPreds.size() < TOP_K || conf >= minConf) {
-      conf = topKStep(pred, predStack, decPreds);
+    int i = 0;
+    while ((decPreds.size() < TOP_K || conf >= minConf) && i < maxIter) {
+      conf = topKStep(pred, predStack, decPreds, rawPreds);
+      i++;
     }
 
     List<PredConf> allPreds = decPreds.entrySet().stream()
@@ -343,15 +348,15 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
             .sorted((a,b) -> Float.compare(b.conf, a.conf))
             .collect(toList());
 
-    return allPreds.subList(0, TOP_K);
+    return allPreds.subList(0, Math.min(allPreds.size(), TOP_K));
   }
 
-  private float topKStep(List<List<Float>> pred, List<Stuff> predStack, Map<String, Float> decPreds) {
+  private float topKStep(List<List<Float>> pred, List<Stuff> predStack, Map<String, Float> decPreds, Set<List<String>> rawPreds) {
     Stuff cur = predStack.remove(predStack.size()-1);  // Sort reversed and remove(0)?
     topKSubStep(cur.rawPred, cur.rawConf, cur.sortedIdxs, pred, predStack);
 
     if (cur.newPred != null) {
-      decodeAndStore(cur.newPred, cur.newRawConf, decPreds);
+      decodeAndStore(cur.newPred, cur.newRawConf, decPreds, rawPreds);
       topKSubStep(cur.newPred, cur.newRawConf, cur.sortedIdxs, pred, predStack);  // Use newConf instead
     }
 
@@ -374,8 +379,10 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
       }
     }
 
-    List<List<Integer>> sortedIdxs = new ArrayList<>(sortedIndexes);  // Sufficient copy?
+    // Make a deep copy of sortedIndexes
+    List<List<Integer>> sortedIdxs = sortedIndexes.stream().map(ArrayList::new).collect(toList());
     Integer newIndex = sortedIdxs.get(minIndex).remove(sortedIdxs.get(minIndex).size()-1);
+    // Shallow copies sufficient for pred and conf
     List<Integer> newPred = new ArrayList<>(rawPred);
     List<Float> newRawConf = new ArrayList<>(rawConf);
     newPred.set(minIndex, newIndex);
@@ -398,12 +405,15 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
     }
   }
 
-  private PredConf decodeAndStore(List<Integer> rawPred, List<Float> rawConf, Map<String, Float> dict) {
+  private PredConf decodeAndStore(List<Integer> rawPred, List<Float> rawConf, Map<String, Float> dict, Set<List<String>> rawPreds) {
     List<String> rawString = rawPred.stream().map(i -> "" + ALPHABET.charAt(i)).collect(toList());
     String decodedPred = decode(rawString, rawConf);
     float conf = rawConf.stream().reduce(1f, (a, b) -> a*b);
-    float totalConf = conf + dict.getOrDefault(decodedPred, 0f);
-    dict.put(decodedPred, totalConf);
+    if (!rawPreds.contains(rawString)) {
+      rawPreds.add(rawString);
+      float totalConf = conf + dict.getOrDefault(decodedPred, 0f);
+      dict.put(decodedPred, totalConf);
+    }
     return new PredConf(decodedPred, conf);
   }
 
